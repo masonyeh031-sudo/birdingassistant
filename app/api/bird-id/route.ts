@@ -65,6 +65,63 @@ type VisionAnalysis = {
   candidates: Candidate[];
 };
 
+type OpenAIErrorPayload = {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
+  };
+};
+
+const defaultBirdIdModel = "gpt-4.1-mini";
+const fallbackBirdIdModels = ["gpt-4.1-mini", "gpt-4o-mini"];
+
+function getBirdIdModelCandidates() {
+  return Array.from(
+    new Set([process.env.OPENAI_BIRD_ID_MODEL || defaultBirdIdModel, ...fallbackBirdIdModels])
+  );
+}
+
+function parseOpenAIError(errorText: string) {
+  try {
+    return JSON.parse(errorText) as OpenAIErrorPayload;
+  } catch {
+    return {};
+  }
+}
+
+function getOpenAIErrorMessage(status: number, errorText: string) {
+  const payload = parseOpenAIError(errorText);
+  const message = payload.error?.message ?? errorText;
+  const code = payload.error?.code ?? payload.error?.type ?? "";
+  const lowerMessage = message.toLowerCase();
+
+  if (
+    status === 429 &&
+    (code.includes("quota") ||
+      code.includes("insufficient") ||
+      lowerMessage.includes("quota") ||
+      lowerMessage.includes("billing") ||
+      lowerMessage.includes("insufficient"))
+  ) {
+    return "OpenAI API 額度不足或帳單尚未啟用，所以目前無法完成照片辨識。請到 OpenAI 後台確認 Billing / Usage，補足額度後再重新分析。";
+  }
+
+  if (status === 429) {
+    return "OpenAI 影像辨識目前達到速率限制。我已自動改用較省的模型重試；如果仍失敗，請等 1 到 2 分鐘後重新按一次「開始分析」。";
+  }
+
+  if (status === 401) {
+    return "OpenAI API key 驗證失敗。請確認 Vercel 的 OPENAI_API_KEY 是否貼到完整的新 key，且舊 key 沒有被刪掉或停用。";
+  }
+
+  if (status >= 500) {
+    return "OpenAI 影像辨識服務暫時不穩定。我已避免硬猜鳥種，請稍後重新分析同一張照片。";
+  }
+
+  return `照片分析暫時失敗，服務回傳：${message.slice(0, 180)}`;
+}
+
 function lowerConfidence(confidence: Confidence): Confidence {
   if (confidence === "高") return "中";
   if (confidence === "中") return "低";
@@ -1212,61 +1269,83 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
     },
   };
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: process.env.OPENAI_BIRD_ID_MODEL || "gpt-4.1",
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: prompt,
-            },
-            {
-              type: "input_image",
-              image_url: body.imageDataUrl,
-              detail: "high",
-            },
-          ],
-        },
-      ],
-      text: {
-        format: responseFormat,
+  async function callBirdVisionModel(model: string, detail: "high" | "low") {
+    return fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
       },
-    }),
-  });
+      body: JSON.stringify({
+        model,
+        max_output_tokens: 1800,
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: prompt,
+              },
+              {
+                type: "input_image",
+                image_url: body.imageDataUrl,
+                detail,
+              },
+            ],
+          },
+        ],
+        text: {
+          format: responseFormat,
+        },
+      }),
+    });
+  }
 
-  if (!response.ok) {
-    const errorText = await response.text();
+  let response: Response | undefined;
+  let errorText = "";
+  let modelUsed = "";
+  const modelCandidates = getBirdIdModelCandidates();
 
-    if (response.status === 429) {
+  for (const [index, model] of modelCandidates.entries()) {
+    modelUsed = model;
+    response = await callBirdVisionModel(model, index === 0 ? "high" : "low");
+
+    if (response.ok) {
+      errorText = "";
+      break;
+    }
+
+    errorText = await response.text();
+
+    if (![429, 500, 502, 503, 504].includes(response.status)) {
+      break;
+    }
+  }
+
+  if (!response?.ok) {
+    const status = response?.status ?? 500;
+    const actionMessage = getOpenAIErrorMessage(status, errorText);
+
+    if (status === 429) {
       return NextResponse.json(
         buildImageUnavailableResult(
-          "影像辨識服務目前忙碌中。為了避免硬猜，這次不輸出鳥種候選，請稍後重新上傳同一張照片。"
+          `${actionMessage} 這次最後嘗試的模型是 ${modelUsed || defaultBirdIdModel}。`
         )
       );
     }
 
-    if (response.status >= 500) {
+    if (status >= 500) {
       return NextResponse.json(
         buildImageUnavailableResult(
-          "影像辨識服務暫時不穩定。為了避免硬猜，這次不輸出鳥種候選，請之後再重試 AI 照片辨識。"
+          `${actionMessage} 這次最後嘗試的模型是 ${modelUsed || defaultBirdIdModel}。`
         )
       );
     }
 
     return NextResponse.json(
       {
-        error:
-          response.status === 401
-            ? "影像辨識 API 驗證失敗，請確認 OPENAI_API_KEY 是否正確。"
-            : `照片分析暫時失敗，服務回傳：${errorText.slice(0, 200)}`,
+        error: actionMessage,
       },
       { status: 502 }
     );

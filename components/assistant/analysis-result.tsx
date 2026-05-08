@@ -64,6 +64,11 @@ export function AnalysisResult({
   const uncertain =
     result?.topMatch.confidence === "低" || Boolean(result?.isCloseCall) || limitedPhoto;
   const comparisonCandidates = result ? [result.topMatch, ...result.alternatives].slice(0, 2) : [];
+  const noGuessResult =
+    result?.isBird === false ||
+    result?.subjectType === "not_bird" ||
+    result?.subjectType === "unverified";
+  const noGuessIsNonBird = result?.isBird === false || result?.subjectType === "not_bird";
 
   return (
     <section id="analysis-result" className="mt-10">
@@ -116,7 +121,71 @@ export function AnalysisResult({
         </div>
       ) : null}
 
-      {result ? (
+      {result && noGuessResult ? (
+        <div className="rounded-[36px] border border-amber-200 bg-[linear-gradient(135deg,rgba(255,250,239,0.96),rgba(255,255,255,0.98)_56%,rgba(219,232,236,0.55))] p-6 shadow-card">
+          <div className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
+            <div className="rounded-[30px] border border-white/80 bg-white/90 p-5 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-moss-500">
+                主體檢查
+              </p>
+              <h3 className="mt-3 text-3xl font-black text-pine">
+                {noGuessIsNonBird ? "這張照片看起來不是鳥類" : "目前無法可靠判讀照片"}
+              </h3>
+              <p className="mt-4 text-sm leading-7 text-moss-700">
+                {result.nonBirdReason ?? result.description}
+              </p>
+              <div className="mt-5 rounded-[24px] bg-amber-50 px-4 py-4 text-sm leading-7 text-amber-900">
+                系統已停止鳥種猜測，不會把非鳥類、模糊照片或沒有清楚鳥體的照片硬套成白頭翁、麻雀或其他鳥種。
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-[28px] border border-moss-100 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-moss-500">
+                  為什麼沒有輸出候選
+                </p>
+                <ul className="mt-3 space-y-2 text-sm leading-7 text-moss-700">
+                  {result.topMatch.reasoning.map((item) => (
+                    <li key={item}>• {item}</li>
+                  ))}
+                </ul>
+              </div>
+
+              {result.photoIssues?.length ? (
+                <div className="rounded-[28px] border border-orange-200 bg-orange-50 p-5 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-orange-800">
+                    照片限制
+                  </p>
+                  <p className="mt-3 text-sm leading-7 text-orange-900">
+                    {result.photoIssues.join("、")}
+                  </p>
+                </div>
+              ) : null}
+
+              <div className="rounded-[28px] border border-moss-100 bg-sky/60 p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-moss-500">
+                  建議下一步
+                </p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {result.suggestedPhotos?.map((item) => (
+                    <div key={item} className="rounded-[20px] bg-white/92 px-4 py-3 text-sm font-semibold text-pine">
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {result.analysisModeNote ? (
+                <div className="rounded-[28px] border border-moss-100 bg-white p-5 text-sm leading-7 text-moss-700 shadow-sm">
+                  {result.analysisModeNote}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {result && !noGuessResult ? (
         <div className="space-y-5 rounded-[36px] border border-moss-100 bg-white/92 p-6 shadow-card">
           {result.initialCandidates?.length ? (
             <div className="rounded-[32px] border border-white/80 bg-moss-50/55 p-4 shadow-sm sm:p-5">

@@ -21,7 +21,10 @@ type ApiCandidate = {
 };
 
 type ApiBirdIdResponse = {
-  mode?: "api" | "fallback";
+  mode?: "api" | "fallback" | "unverified";
+  isBird?: boolean;
+  subjectType?: "bird" | "not_bird" | "uncertain" | "unverified";
+  nonBirdReason?: string;
   engineNote?: string;
   summary?: string;
   likelyGroup?: string;
@@ -373,6 +376,8 @@ function photoIssueGuidance(issue: string) {
     逆光: "這張照片逆光較重，建議換光線方向再拍一次。",
     遮擋: "主體被葉片、枝條或其他物體遮住，請嘗試補拍無遮擋角度。",
     "角度不足": "目前角度不足，請補拍正面、側面或尾羽更清楚的角度。",
+    非鳥類: "照片主體看起來不是鳥類，因此不進行鳥種猜測。",
+    無可辨識鳥體: "照片中沒有清楚可辨識的鳥體，請改上傳鳥類主體明確的照片。",
   };
 
   return map[issue] ?? issue;
@@ -455,6 +460,8 @@ function buildLocalResponse(form: BirdObservationFormState): BirdAnalysisRespons
   const isCloseCall = Boolean(secondName) && topScore - secondScore <= 2;
 
   return {
+    isBird: true,
+    subjectType: "uncertain",
     topMatch: normalizeMatch(top.topMatch, topScore, topReasoning),
     alternatives: alternativeMatches,
     initialCandidates,
@@ -498,15 +505,121 @@ function buildLocalResponse(form: BirdObservationFormState): BirdAnalysisRespons
   };
 }
 
+function buildNoGuessResponse(
+  apiResult: ApiBirdIdResponse,
+  form: BirdObservationFormState,
+  kind: "not_bird" | "unverified"
+): BirdAnalysisResponse {
+  const photoIssueMessages = (apiResult.photoIssues ?? []).map(photoIssueGuidance);
+  const isNotBird = kind === "not_bird";
+  const title = isNotBird ? "不是鳥類" : "尚未完成照片判讀";
+  const reason =
+    apiResult.nonBirdReason ||
+    (isNotBird
+      ? "照片中沒有清楚可辨識的鳥類主體，因此不應輸出鳥種候選。"
+      : "影像辨識沒有成功讀取照片內容，因此這次不輸出鳥種候選。");
+
+  return {
+    isBird: isNotBird ? false : undefined,
+    subjectType: kind,
+    nonBirdReason: reason,
+    topMatch: {
+      chineseName: title,
+      englishName: isNotBird ? "Not a bird" : "Image not verified",
+      scientificName: "N/A",
+      confidence: "低",
+      reasoning: [
+        reason,
+        isNotBird
+          ? "系統已停止鳥種猜測，避免把非鳥類照片誤判成台灣鳥種。"
+          : "目前無法確認照片主體是否為鳥類，因此不會退回本地資料硬猜。",
+      ],
+    },
+    alternatives: [],
+    initialCandidates: [],
+    isCloseCall: false,
+    likelyGroup: isNotBird ? "非鳥類 / 無可辨識鳥體" : "尚未確認",
+    uncertaintyFactors:
+      apiResult.uncertaintyFactors ??
+      (isNotBird
+        ? ["照片主體不是鳥類或沒有清楚鳥體"]
+        : ["影像辨識服務未完成判讀", "目前無法確認照片主體是否為鳥類"]),
+    rankingChangeNote:
+      apiResult.rerankSummary ??
+      (isNotBird
+        ? "主體檢查沒有通過，因此沒有進入鳥種候選重排。"
+        : "照片尚未被可靠判讀，因此沒有進入候選重排。"),
+    eliminatedCandidates: [],
+    photoQuality: "limited",
+    photoIssues: apiResult.photoIssues,
+    needsMorePhotos: true,
+    description:
+      apiResult.summary ??
+      (isNotBird
+        ? "這張照片看起來不是鳥類照片，或照片中沒有足夠清楚的鳥體可供辨識。"
+        : "照片辨識服務這次沒有成功完成判讀，所以系統選擇不輸出鳥名。"),
+    habitat: "不適用。請先確認照片中有清楚可辨識的鳥類主體。",
+    diet: "不適用。",
+    behavior: "不適用。",
+    commonnessTaiwan: "不適用。",
+    similarSpecies: [],
+    observationSummary:
+      apiResult.summary ??
+      (isNotBird
+        ? "這次不建立鳥種觀察結論，因為照片主體不是鳥類或缺少可辨識鳥體。"
+        : "這次不建立鳥種觀察結論，因為照片沒有被可靠判讀。"),
+    surveySuggestions: Array.from(
+      new Set([
+        ...photoIssueMessages,
+        apiResult.bestFocusArea ?? "請改上傳鳥體清楚、全身或側面比例明顯的照片。",
+        apiResult.photoHelp ??
+          "請確認照片中只有一隻主要鳥體，且鳥不要太小、太模糊或被遮擋。",
+      ])
+    ),
+    analysisModeNote:
+      apiResult.engineNote ??
+      (isNotBird
+        ? "這次先做主體檢查；因為不是鳥類，所以沒有進入鳥種辨識。"
+        : "這次沒有可靠影像判讀，因此系統不會硬猜鳥名。"),
+    keyFeatures: apiResult.photoClues ?? ["沒有可用鳥類特徵"],
+    environmentFit: `你選的是「${labelForEnvironment(getSelectedEnvironment(form))}」，但主體檢查優先於環境條件。`,
+    sizeFit: "大小條件不適用，因為目前沒有可辨識鳥體。",
+    colorFit: "顏色條件不適用，因為目前沒有可辨識鳥體。",
+    autoColorSummary: getAutoColorSummary(form),
+    colorInfluenceSummary: "沒有影響。主體不是鳥類或照片未被可靠判讀時，顏色不會拿來硬套鳥種。",
+    manualColorImpact: getManualColorImpact(form),
+    decisiveFactor: isNotBird ? "主體是否為鳥類" : "照片是否被可靠判讀",
+    missingInfo: ["清楚鳥體輪廓", "嘴型", "羽毛與翅膀", "側面或全身比例"],
+    suggestedPhotos: ["鳥體清楚的全身照", "側面照", "正面頭部照", "避免背景或非鳥類主體的照片"],
+  };
+}
+
 function transformApiResult(apiResult: ApiBirdIdResponse, form: BirdObservationFormState): BirdAnalysisResponse {
   const finalSize = getFinalSelectedSize(form);
+
+  if (apiResult.isBird === false || apiResult.subjectType === "not_bird") {
+    return buildNoGuessResponse(apiResult, form, "not_bird");
+  }
+
+  if (apiResult.subjectType === "unverified") {
+    return buildNoGuessResponse(apiResult, form, "unverified");
+  }
+
   const candidates = (apiResult.candidates ?? []).slice(0, 3);
   const topCandidate = candidates[0];
   const limitedPhoto =
     apiResult.photoQuality === "limited" || (apiResult.photoIssues?.length ?? 0) > 0;
 
   if (!topCandidate) {
-    return buildLocalResponse(form);
+    return buildNoGuessResponse(
+      {
+        ...apiResult,
+        subjectType: "unverified",
+        nonBirdReason: "API 沒有回傳候選鳥種，因此系統不會改用本地資料硬猜。",
+      },
+      form,
+      "unverified"
+    );
   }
 
   const topProfile = findProfile(topCandidate.name);
@@ -540,6 +653,8 @@ function transformApiResult(apiResult: ApiBirdIdResponse, form: BirdObservationF
     ]);
 
   return {
+    isBird: true,
+    subjectType: apiResult.subjectType ?? "bird",
     topMatch: buildGenericResultFromCard(topCandidate.name, topCandidate.confidence, [topCandidate.reason]),
     alternatives,
     initialCandidates,
@@ -666,8 +781,22 @@ export async function analyzeBird(form: BirdObservationFormState): Promise<BirdA
   if (form.imagePreview) {
     try {
       return await analyzeWithApi(form);
-    } catch {
-      return buildLocalResponse(form);
+    } catch (error) {
+      return buildNoGuessResponse(
+        {
+          mode: "unverified",
+          subjectType: "unverified",
+          nonBirdReason:
+            error instanceof Error
+              ? error.message
+              : "照片辨識流程暫時失敗，因此系統不會改用本地資料硬猜。",
+          engineNote:
+            "照片辨識流程暫時沒有成功完成。為了避免把非鳥類或不清楚照片硬猜成鳥，這次不輸出鳥種候選。",
+          photoIssues: ["角度不足"],
+        },
+        form,
+        "unverified"
+      );
     }
   }
 

@@ -58,6 +58,9 @@ export type EliminatedCandidateNote = {
 };
 
 export type BirdAnalysisResponse = {
+  isBird?: boolean;
+  subjectType?: "bird" | "not_bird" | "uncertain" | "unverified";
+  nonBirdReason?: string;
   topMatch: BirdAnalysisMatch;
   alternatives: BirdAnalysisMatch[];
   initialCandidates?: BirdAnalysisMatch[];

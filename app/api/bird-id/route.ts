@@ -42,6 +42,9 @@ type Candidate = {
 };
 
 type VisionAnalysis = {
+  isBird: boolean;
+  subjectType: "bird" | "not_bird" | "uncertain";
+  nonBirdReason: string;
   summary: string;
   likelyGroup: string;
   uncertaintyFactors: string[];
@@ -508,6 +511,9 @@ function buildFallbackResult(body: BirdIdRequest, engineNote?: string) {
 
   return {
     mode: "fallback",
+    isBird: true,
+    subjectType: "uncertain",
+    nonBirdReason: "",
     engineNote:
       engineNote ?? "目前未設定 OPENAI_API_KEY，已自動改用站內輔助辨識模式。",
     likelyGroup:
@@ -536,6 +542,68 @@ function buildFallbackResult(body: BirdIdRequest, engineNote?: string) {
         ? `${first.name} 目前排在 ${second.name} 前面，主要是因為它對上更多環境、體型或特徵條件；不過仍建議再看照片中的頭部與嘴型差異。`
         : "目前候選差距還不大，建議先看照片裡最清楚的部位，再和常見鳥類卡片交叉確認。",
     candidates,
+  };
+}
+
+function buildImageUnavailableResult(engineNote: string) {
+  return {
+    mode: "unverified",
+    subjectType: "unverified",
+    nonBirdReason: "目前沒有成功讀取照片內容，因此不會硬猜鳥種。",
+    engineNote,
+    summary:
+      "目前無法可靠完成照片判讀，所以這次先不輸出鳥種候選，避免把非鳥類或不清楚照片硬猜成鳥。",
+    likelyGroup: "尚未確認",
+    uncertaintyFactors: ["照片辨識服務未完成判讀", "目前無法確認照片主體是否為鳥類"],
+    initialCandidates: [],
+    rerankSummary: "照片尚未被成功判讀，因此沒有進入候選重排。",
+    eliminatedCandidates: [],
+    photoClues: ["尚未取得可靠照片線索"],
+    photoQuality: "limited",
+    photoIssues: ["角度不足"],
+    bestFocusArea: "請重新上傳鳥體清楚、佔畫面比例較高的照片。",
+    photoHelp:
+      "系統現在採取保守策略：只要照片沒有被可靠讀取，就不輸出鳥名。請稍後重試，或換一張主體更清楚的鳥類照片。",
+    comparisonReason: "沒有可靠候選可以比較。",
+    candidates: [],
+  };
+}
+
+function buildNonBirdResult(vision: VisionAnalysis) {
+  return {
+    mode: "api",
+    isBird: false,
+    subjectType: "not_bird",
+    nonBirdReason:
+      vision.nonBirdReason ||
+      "照片中沒有清楚可辨識的鳥體，因此不應輸出鳥種候選。",
+    engineNote:
+      "影像模型已先做主體檢查，這張照片沒有通過「可辨識鳥類」判定，所以系統停止鳥種猜測。",
+    summary:
+      vision.summary ||
+      "這張照片看起來不是鳥類照片，或照片中沒有足夠清楚的鳥體可供辨識。",
+    likelyGroup: "非鳥類 / 無可辨識鳥體",
+    uncertaintyFactors:
+      vision.uncertaintyFactors.length > 0
+        ? vision.uncertaintyFactors
+        : ["照片主體不像鳥類", "缺少鳥類輪廓、嘴型、羽色或腿部等可判讀特徵"],
+    initialCandidates: [],
+    rerankSummary: "因為主體不是鳥類或沒有可辨識鳥體，所以沒有進入鳥種候選重排。",
+    eliminatedCandidates: [],
+    photoClues:
+      vision.photoClues.length > 0
+        ? vision.photoClues
+        : ["未看到可辨識鳥體輪廓", "未看到可供判斷的嘴型、羽毛或腳部特徵"],
+    photoQuality: vision.photoQuality,
+    photoIssues: vision.photoIssues,
+    bestFocusArea:
+      vision.bestFocusArea ||
+      "請改傳鳥體清楚、全身或側面比例明顯的照片。",
+    photoHelp:
+      vision.photoHelp ||
+      "這次不會硬猜鳥種。若要辨識鳥類，請上傳鳥在畫面中清楚可見、不要被遮擋或太遠的照片。",
+    comparisonReason: "非鳥類照片不進行鳥種差異比較。",
+    candidates: [],
   };
 }
 
@@ -688,6 +756,10 @@ function observationConflictPenalty(observationSpot: string | undefined, birdTra
 }
 
 function rerankWithVision(body: BirdIdRequest, vision: VisionAnalysis) {
+  if (!vision.isBird || vision.subjectType === "not_bird") {
+    return buildNonBirdResult(vision);
+  }
+
   const directCandidates = cleanModelCandidates(vision.candidates);
   const directCandidateMap = new Map(directCandidates.map((candidate) => [candidate.name, candidate]));
   const limitedPhoto = vision.photoQuality === "limited" || vision.photoIssues.length > 0;
@@ -885,9 +957,8 @@ export async function POST(request: Request) {
 
   if (!apiKey) {
     return NextResponse.json(
-      buildFallbackResult(
-        body,
-        "目前未設定 OPENAI_API_KEY，已自動改用站內輔助辨識模式。"
+      buildImageUnavailableResult(
+        "目前未設定 OPENAI_API_KEY，因此無法真的讀取照片內容。為了避免硬猜，這次不輸出鳥種候選。"
       )
     );
   }
@@ -903,6 +974,13 @@ ${birdCatalog}
 
 【核心辨識流程】
 你必須分兩個階段進行辨識：
+
+第零階段：先判斷照片主體是不是鳥
+- 在任何鳥種猜測之前，請先判斷照片中是否有「清楚可見的鳥類主體」。
+- 如果照片主體不是鳥類，例如人、貓、狗、昆蟲、植物、食物、玩具、室內物件、風景、截圖、插畫、籠具或其他非鳥類，請將 isBird 設為 false、subjectType 設為 "not_bird"，candidates 與 initialCandidates 都必須輸出空陣列。
+- 如果照片中沒有鳥，或鳥體太小、太模糊、被遮擋到無法確認是否為鳥，也不要硬猜鳥名；請保守說明目前沒有可辨識鳥體。
+- 只有在照片中確實可見鳥體輪廓、嘴型、羽毛、腳部、翅膀或其他鳥類特徵時，才可進入鳥種候選流程。
+- 若判定不是鳥類，請在 nonBirdReason 說明原因，summary 用一般使用者看得懂的文字說「這張照片看起來不是鳥類照片」或「照片中沒有可辨識鳥體」。
 
 第一階段：照片初步辨識
 - 先根據照片本身判斷，不要一開始就被使用者條件綁死。
@@ -997,6 +1075,8 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
 - 若資訊不足，不可假裝非常確定，必須保守輸出候選清單。
 
 【輸出原則】
+- 如果照片不是鳥類，請不要輸出任何鳥種候選，不要從固定鳥種資料中硬挑一種。
+- 如果照片不是鳥類，initialCandidates 與 candidates 必須都是空陣列，likelyGroup 請填「非鳥類 / 無可辨識鳥體」。
 - 請在 initialCandidates 中輸出第一階段的 Top 5。
 - 請在 candidates 中輸出第二階段加入條件後重新排序的 Top 3。
 - 每個候選都要有簡短理由。
@@ -1019,6 +1099,12 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
       type: "object",
       additionalProperties: false,
       properties: {
+        isBird: { type: "boolean" },
+        subjectType: {
+          type: "string",
+          enum: ["bird", "not_bird", "uncertain"],
+        },
+        nonBirdReason: { type: "string" },
         summary: { type: "string" },
         likelyGroup: { type: "string" },
         uncertaintyFactors: {
@@ -1066,7 +1152,7 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
           type: "array",
           items: {
             type: "string",
-            enum: ["主體太小", "模糊", "逆光", "遮擋", "角度不足"],
+            enum: ["主體太小", "模糊", "逆光", "遮擋", "角度不足", "非鳥類", "無可辨識鳥體"],
           },
         },
         bestFocusArea: { type: "string" },
@@ -1104,6 +1190,9 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
         },
       },
       required: [
+        "isBird",
+        "subjectType",
+        "nonBirdReason",
         "summary",
         "likelyGroup",
         "uncertaintyFactors",
@@ -1121,7 +1210,7 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
         "candidates",
       ],
     },
-  } as const;
+  };
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -1158,18 +1247,16 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
 
     if (response.status === 429) {
       return NextResponse.json(
-        buildFallbackResult(
-          body,
-          "影像辨識服務目前忙碌中，所以先改用站內輔助辨識模式。你仍可以先看候選結果，晚一點再重新上傳同一張照片做 AI 辨識。"
+        buildImageUnavailableResult(
+          "影像辨識服務目前忙碌中。為了避免硬猜，這次不輸出鳥種候選，請稍後重新上傳同一張照片。"
         )
       );
     }
 
     if (response.status >= 500) {
       return NextResponse.json(
-        buildFallbackResult(
-          body,
-          "影像辨識服務暫時不穩定，所以先改用站內輔助辨識模式。你可以先參考這份候選結果，之後再回來重試 AI 照片辨識。"
+        buildImageUnavailableResult(
+          "影像辨識服務暫時不穩定。為了避免硬猜，這次不輸出鳥種候選，請之後再重試 AI 照片辨識。"
         )
       );
     }
@@ -1193,9 +1280,8 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
 
   if (!rawText) {
     return NextResponse.json(
-      buildFallbackResult(
-        body,
-        "影像模型這次沒有回傳可解析內容，所以先改用站內輔助辨識模式。建議之後再試一次，或換一張主體更清楚的照片。"
+      buildImageUnavailableResult(
+        "影像模型這次沒有回傳可解析內容。為了避免硬猜，這次不輸出鳥種候選，請稍後再試一次或換一張主體更清楚的照片。"
       )
     );
   }
@@ -1205,9 +1291,8 @@ Step 5｜先在內部思考 Top 5 候選，再輸出 Top 3
     return NextResponse.json(rerankWithVision(body, parsed));
   } catch {
     return NextResponse.json(
-      buildFallbackResult(
-        body,
-        "影像模型回傳格式這次無法解析，所以先改用站內輔助辨識模式。你可以先參考候選結果，晚點再重新試一次。"
+      buildImageUnavailableResult(
+        "影像模型回傳格式這次無法解析。為了避免硬猜，這次不輸出鳥種候選，請晚點再重新試一次。"
       )
     );
   }
